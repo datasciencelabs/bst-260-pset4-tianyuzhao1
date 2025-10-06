@@ -67,7 +67,7 @@ resp_content_type(response)
 Hints: 1) Use the `resp_body_json` function. 2) The first row of the matrix will be the variable names and this OK as we will fix in the next exercise.
 
 ```{r}
-population <- resp_body_json(response)
+population <- resp_body_json(response, simplifyVector = TRUE)
 ```
 
 6. Examine the `population` matrix you just created. Notice that 1) it is not tidy, 2) the column types are not what we want, and 3) the first row is a header. Convert `population` to a tidy dataset. Remove the state ID column and change the name of the column with state names to `state_name`. Add a column with state abbreviations called `state`. Make sure you assign the abbreviations for DC and PR correctly. Hint: Use the **janitor** package to make the first row the header. 
@@ -77,11 +77,9 @@ population <- resp_body_json(response)
 #| warning: false
 library(tidyverse)
 library(janitor)
-population <- as.data.frame(do.call(rbind, population)) # bind the list elements into a data frame 
-population <- row_to_names(population, row_number = 1) # Use janitor row to names function
-names(population)
 
 population <- population |>   
+  row_to_names(1) |>
   as_tibble() |> # convert to tibble
   select(-state) |> # remove state column
   rename(state_name = NAME) |> # rename state column to state_name
@@ -90,11 +88,11 @@ population <- population |>
                values_to = "population") |>   # use pivot_longer to tidy
   mutate(
     year = str_remove(year, "POP_"),  # remove POP_ from year
-    population = as.numeric(population), # parese all relevant colunns to numeric
+    population = as.numeric(population, year), # parese all relevant colunns to numeric
     abbreviation = case_when(
-      TRUE ~ state.abb[match(state_name, state_name)], # add state abbreviations using state.abb variable
-      state_name == "District Of Columbia" ~ "DC", # use case_when to add abbreviations for DC and PR
+      state_name == "District of Columbia" ~ "DC", # use case_when to add abbreviations for DC and PR
       state_name == "Puerto Rico" ~ "PR",
+      TRUE ~ state.abb[match(state_name, state.name)] # add state abbreviations using state.abb variable
     )
   )
 
@@ -107,9 +105,7 @@ glimpse(population)
 library(ggplot2)
 library(tidytext)
 population |> 
-  filter(year %in% c("2020", "2021")) |>
-  mutate(state_name = reorder_within(state_name, population, year)) |> # reorder state
-  ggplot(aes(x = state_name, y = population, fill = year)) + # assign aesthetic mapping
+  ggplot(aes(x = reorder(state_name, population), y = population, fill = year)) + # assign aesthetic mapping
   geom_col() + # use geom_col to plot barplot
   coord_flip() + # flip coordinates
   facet_wrap(~year, ncol = 2, scales = "free_x") + # facet by year
@@ -151,7 +147,10 @@ regions <- regions |>
     region_name == "New York and New Jersey, Puerto Rico, Virgin Islands",
     "NY, NJ, PR and VI",
     region_name
-  ))
+  )) |>
+  unnest(state_name) |>
+  filter(state_name %in% population$state_name)|>
+  arrange(region, state_name)
 
 glimpse(regions)
 ```
@@ -159,16 +158,8 @@ glimpse(regions)
 9. Add a region and region name columns to the `population` data frame.
 
 ```{r}
-regions_flat <- regions |>
-  mutate(region = unlist(region)) |>
-  unnest(state_name) |>
-  mutate(state_name = as.character(state_name))
-
 population <- population |>
-  mutate(state_name = as.character(state_name))
-
-population <- population |>
-  left_join(regions_flat, by = "state_name")
+  left_join(regions, by = "state_name")
 
 glimpse(population)
 ```
@@ -205,11 +196,11 @@ cases_raw <- resp_body_json(cdc_resp, simplifyVector = TRUE) |>
   as_tibble()
 
 cases_raw <- cases_raw |>
-  transmute(
-    state = state,
-    date = as_date(end_date),
-    cases = as.numeric(tot_cases)
-  )
+  mutate(
+    date = as.Date(end_date),
+    cases = as.numeric(new_cases)
+  ) |>
+  select(state, date, cases)
 
 glimpse(cases_raw)
 ```
@@ -218,14 +209,12 @@ glimpse(cases_raw)
 12. For 2020 and 2021, make a time series plot of cases per 100,000 versus time for each state. Stratify the plot by region name. Make sure to label you graph appropriately. 
 
 ```{r}
-pop_2020 <- population |>
-  filter(year == "2020") |>
-  select(state_name, abbreviation, population, region_name) |>
-  rename(state=abbreviation)
-
 cases <- cases_raw |>
-  left_join(pop_2020, by = "state") |>
+  mutate(year = year(date)) |>
   filter(year(date) %in% c(2020, 2021)) |>
+  right_join(population |> mutate(year = as.numeric(year)) |>
+               select(abbreviation, year, population, region_name),
+             by = c("state" = "abbreviation", "year" = "year")) |>
   mutate(
     cases_per_100k = (cases / population) * 100000
   )
@@ -294,9 +283,9 @@ deaths <- deaths_raw |>
   transmute(
     state = state,
     date = as_date(end_date),
-    deaths = as.numeric(total_deaths)
+    deaths = as.numeric(covid_19_deaths)
   ) |>
-  filter(!is.na(state), !is.na(date), !is.na(deaths)) |>
+  filter(!is.na(date), !is.na(state), !is.na(deaths)) |>
   arrange(state, date)
 
 glimpse(deaths)
@@ -306,7 +295,7 @@ glimpse(deaths)
 
 ```{r}
 deaths_by_state <- deaths |>
-  filter(state != "United States") |>
+  filter(state %in% population$state_name) |>
   group_by(state) |>
   summarise(state_total_deaths = sum(deaths, na.rm = TRUE), .groups = "drop") |>
   arrange(desc(state_total_deaths)) |>
